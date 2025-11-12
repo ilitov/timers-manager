@@ -8,23 +8,29 @@
 
 using namespace std::chrono_literals;
 
-static std::chrono::seconds timeNow() {
-	return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch());
-}
-
 class TimersManager {
 public:
 	using TimerCallback = std::function<void()>;
 
+private:
+	using TimersPrecision = std::chrono::milliseconds;
+
+	template <typename TimeoutType>
+	static constexpr bool IsTimeoutDuration = std::is_same_v<TimeoutType, std::chrono::duration<typename TimeoutType::rep, typename TimeoutType::period>>;
+
 	struct Timer {
 		std::uint64_t id;
-		std::chrono::seconds timeout;
+		TimersPrecision timeout;
 		TimerCallback callback;
 
 		bool operator>(const Timer &rhs) const {
 			return timeout > rhs.timeout;
 		}
 	};
+
+	static TimersPrecision timeNow() {
+		return std::chrono::duration_cast<TimersPrecision>(std::chrono::steady_clock::now().time_since_epoch());
+	}
 
 public:
 	TimersManager() {
@@ -44,11 +50,15 @@ public:
 		m_cv.notify_one();
 	}
 
-	void insertTimer(TimerCallback cb, std::chrono::seconds timeout) {
+	template <typename TimeoutType>
+	requires IsTimeoutDuration<TimeoutType>
+	void insertTimer(TimerCallback cb, TimeoutType timeout) {
 		const bool wakeUpWorker = std::invoke([&, this] {
 			std::lock_guard lock(m_mtx);
 
-			m_timers.push(Timer{ m_globalTimerId++, timeNow() + timeout, std::move(cb) });
+			const TimersPrecision internalTimeout = std::chrono::duration_cast<TimersPrecision>(timeout);
+
+			m_timers.push(Timer{ m_globalTimerId++, timeNow() + internalTimeout, std::move(cb) });
 
 			// This timer is on the top, wake up the worker
 			if (m_timers.top().id + 1 == m_globalTimerId) {
@@ -74,10 +84,10 @@ private:
 			{
 				std::unique_lock lock(m_mtx);
 
-				std::chrono::seconds nearestTimeout{ std::chrono::seconds::max() };
+				TimersPrecision nearestTimeout{ TimersPrecision::max() };
 
 				if (!m_timers.empty()) {
-					nearestTimeout = std::max(0s, std::chrono::seconds{ m_timers.top().timeout } - timeNow());
+					nearestTimeout = std::max(TimersPrecision{}, m_timers.top().timeout - timeNow());
 				}
 
 				if (nearestTimeout > 0s) {
@@ -95,7 +105,7 @@ private:
 					break;
 				}
 
-				const std::chrono::seconds now = timeNow();
+				const TimersPrecision now = timeNow();
 
 				if (m_timers.top().timeout <= now) {
 					cb = std::move(const_cast<Timer&>(m_timers.top()).callback);
