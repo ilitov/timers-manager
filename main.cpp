@@ -90,10 +90,10 @@ private:
 				TimersPrecision nearestTimeout{ TimersPrecision::max() };
 
 				if (!m_timers.empty()) {
-					nearestTimeout = std::max(TimersPrecision{ 0 }, m_timers.front().timeout - timeNow());
+					nearestTimeout = std::max(TimersPrecision::zero(), m_timers.front().timeout - timeNow());
 				}
 
-				if (nearestTimeout > 0s) {
+				if (nearestTimeout > TimersPrecision::zero()) {
 					// Will be going to sleep -> all timers so far have been processed
 					m_shouldProcessTimers = false;
 
@@ -177,6 +177,8 @@ int main() {
 	timers.insertTimer(TestTimer{}, 2s);
 	timers.insertTimer(TestTimer{}, 1s);
 	timers.insertTimer(TestTimer{}, 0s);
+	timers.insertTimer(TestTimer{}, 5.5s);
+	timers.insertTimer(TestTimer{}, 500ms);
 	timers.insertTimer(RepeatingTimer{ timers, TestTimer{}, 1s }, 4s);
 
 	char c;
