@@ -1,0 +1,170 @@
+#include <iostream>
+#include <functional>
+#include <cstdint>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+static std::chrono::seconds timeNow() {
+	return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch());
+}
+
+class TimersManager {
+public:
+	using TimerCallback = std::function<void()>;
+
+	struct Timer {
+		std::uint64_t id;
+		std::chrono::seconds timeout;
+		TimerCallback callback;
+
+		bool operator>(const Timer &rhs) const {
+			return timeout > rhs.timeout;
+		}
+	};
+
+public:
+	TimersManager() {
+		m_worker = std::jthread([this](std::stop_token stopToken) {
+			workerLoop(stopToken);
+		});
+	}
+
+	TimersManager(const TimersManager &) = delete;
+	TimersManager &operator = (const TimersManager &) = delete;
+	TimersManager(TimersManager &&) = delete;
+	TimersManager &operator=(TimersManager &&) = delete;
+
+	~TimersManager() {
+		// Make sure the worker is stopped before clearing any memory
+		m_worker.get_stop_source().request_stop();
+		m_cv.notify_one();
+	}
+
+	void insertTimer(TimerCallback cb, std::chrono::seconds timeout) {
+		const bool wakeUpWorker = std::invoke([&, this] {
+			std::lock_guard lock(m_mtx);
+
+			m_timers.push(Timer{ m_globalTimerId++, timeNow() + timeout, std::move(cb) });
+
+			// This timer is on the top, wake up the worker
+			if (m_timers.top().id + 1 == m_globalTimerId) {
+				m_shouldProcessTimers = true;
+				return true;
+			}
+
+			return false;
+		});
+
+		if (wakeUpWorker) {
+			m_cv.notify_one();
+		}
+	}
+
+private:
+	void workerLoop(std::stop_token stopToken) {
+		std::cout << "TimersManaer worker started\n";
+
+		while (true) {
+			TimerCallback cb;
+
+			{
+				std::unique_lock lock(m_mtx);
+
+				std::chrono::seconds nearestTimeout{ std::chrono::seconds::max() };
+
+				if (!m_timers.empty()) {
+					nearestTimeout = std::max(0s, std::chrono::seconds{ m_timers.top().timeout } - timeNow());
+				}
+
+				if (nearestTimeout > 0s) {
+					// Will be going to sleep -> all timers so far have been processed
+					m_shouldProcessTimers = false;
+
+					m_cv.wait_for(lock, nearestTimeout, [this, stopToken] { return m_shouldProcessTimers || stopToken.stop_requested(); });
+				}
+				else {
+					// Don't sleep... keep processing timers
+				}
+
+				// Check if we have to exit(note we don't process all pending timers)
+				if (stopToken.stop_requested()) {
+					break;
+				}
+
+				const std::chrono::seconds now = timeNow();
+
+				if (m_timers.top().timeout <= now) {
+					cb = std::move(const_cast<Timer&>(m_timers.top()).callback);
+					m_timers.pop();
+				}
+			}
+
+			if (cb) {
+				cb();
+			}
+		}
+
+		std::cout << "TimersManager worker exiting...\n";
+	}
+
+private:
+	std::mutex m_mtx;
+	std::condition_variable m_cv;
+	bool m_shouldProcessTimers{ false };
+	std::uint64_t m_globalTimerId{ 0 };
+	std::priority_queue<Timer, std::vector<Timer>, std::greater<Timer>> m_timers;
+	std::jthread m_worker;
+};
+
+// Test timer to measure the accuracy of the manager
+struct TestTimer {
+	TestTimer()
+		: creationTime(std::chrono::steady_clock::now()) {
+
+	}
+
+	void operator()() {
+		const auto executionTime = std::chrono::steady_clock::now();
+		const auto diff = executionTime - creationTime;
+
+		std::cout << "Slept for "
+			<< std::chrono::duration_cast<std::chrono::seconds>(diff).count() << "s/"
+			<< std::chrono::duration_cast<std::chrono::milliseconds>(diff).count() << "ms\n";
+
+		// Reset the state
+		creationTime = executionTime;
+	}
+
+	std::chrono::steady_clock::time_point creationTime;
+};
+
+// Small thunk to simulate repeating timers without adding more flags and conditions to the manager
+struct RepeatingTimer {
+	TimersManager &manager;
+	TimersManager::TimerCallback callback;
+	std::chrono::seconds timeout;
+
+	void operator()() const {
+		callback();
+		manager.insertTimer(RepeatingTimer{ manager, std::move(callback), timeout }, timeout);
+	}
+};
+
+int main() {
+	TimersManager timers;
+
+	timers.insertTimer(TestTimer{}, 3s);
+	timers.insertTimer(TestTimer{}, 2s);
+	timers.insertTimer(TestTimer{}, 1s);
+	timers.insertTimer(TestTimer{}, 0s);
+	timers.insertTimer(RepeatingTimer{ timers, TestTimer{}, 1s }, 4s);
+
+	char c;
+	std::cin >> c;
+
+	return 0;
+}
