@@ -15,14 +15,13 @@ public:
 	using TimerCallback = std::function<void()>;
 
 private:
-	using TimersPrecision = std::chrono::milliseconds;
+	using TimeoutType = std::chrono::steady_clock::time_point;
 
 	template <typename TimeoutType>
 	static constexpr bool IsTimeoutDuration = std::is_same_v<TimeoutType, std::chrono::duration<typename TimeoutType::rep, typename TimeoutType::period>>;
 
 	struct Timer {
-		std::uint64_t id{};
-		TimersPrecision timeout{};
+		TimeoutType timeout{};
 		TimerCallback callback{};
 
 		bool operator>(const Timer &rhs) const {
@@ -30,8 +29,8 @@ private:
 		}
 	};
 
-	static TimersPrecision timeNow() {
-		return std::chrono::duration_cast<TimersPrecision>(std::chrono::steady_clock::now().time_since_epoch());
+	static TimeoutType timeNow() {
+		return std::chrono::steady_clock::now();
 	}
 
 public:
@@ -48,29 +47,32 @@ public:
 
 	~TimersManager() {
 		// Make sure the worker is stopped before clearing any memory
-		m_worker.get_stop_source().request_stop();
-		m_cv.notify_one();
+		if (m_worker.joinable()) {
+			m_worker.request_stop();
+			m_cv.notify_one();
+			m_worker.join();
+		}
 	}
 
-	template <typename TimeoutType>
-	requires IsTimeoutDuration<TimeoutType>
-	void insertTimer(TimerCallback cb, TimeoutType timeout) {
-		const bool wakeUpWorker = std::invoke([&, this] {
+	template <typename Timeout>
+	requires IsTimeoutDuration<Timeout>
+	void insertTimer(TimerCallback cb, Timeout timeout) {
+		const bool wakeUpWorker = std::invoke([&] {
 			std::lock_guard lock(m_mtx);
 
-			const TimersPrecision internalTimeout = std::chrono::duration_cast<TimersPrecision>(timeout);
+			const TimeoutType internalTimeout = timeNow() + std::chrono::duration_cast<typename TimeoutType::duration>(timeout);
+			const TimeoutType previousNearestTimeout = m_timers.empty() ? TimeoutType::max() : m_timers.front().timeout;
 
 			// Add new timer and heapify
-			m_timers.push_back(Timer{ m_globalTimerId++, timeNow() + internalTimeout, std::move(cb) });
+			m_timers.push_back(Timer{ internalTimeout, std::move(cb) });
 			std::push_heap(m_timers.begin(), m_timers.end(), std::greater{});
 
 			// This timer is on the top, wake up the worker
-			if (m_timers.front().id + 1 == m_globalTimerId) {
+			if (internalTimeout < previousNearestTimeout) {
 				m_shouldProcessTimers = true;
-				return true;
 			}
 
-			return false;
+			return m_shouldProcessTimers;
 		});
 
 		if (wakeUpWorker) {
@@ -82,26 +84,20 @@ private:
 	void workerLoop(std::stop_token stopToken) {
 		std::cout << "TimersManager worker started\n";
 
+		const auto waitPred = [this, stopToken] { return m_shouldProcessTimers || stopToken.stop_requested(); };
+
 		while (true) {
 			TimerCallback cb;
 
 			{
 				std::unique_lock lock(m_mtx);
 
-				TimersPrecision nearestTimeout{ TimersPrecision::max() };
-
 				if (!m_timers.empty()) {
-					nearestTimeout = std::max(TimersPrecision::zero(), m_timers.front().timeout - timeNow());
-				}
-
-				if (nearestTimeout > TimersPrecision::zero()) {
-					// Will be going to sleep -> all timers so far have been processed
-					m_shouldProcessTimers = false;
-
-					m_cv.wait_for(lock, nearestTimeout, [this, stopToken] { return m_shouldProcessTimers || stopToken.stop_requested(); });
+					const TimeoutType nearestTimeout = m_timers.front().timeout;
+					m_cv.wait_until(lock, nearestTimeout, waitPred);
 				}
 				else {
-					// Don't sleep... keep processing timers
+					m_cv.wait(lock, waitPred);
 				}
 
 				// Check if we have to exit(note we don't process all pending timers)
@@ -109,9 +105,9 @@ private:
 					break;
 				}
 
-				const TimersPrecision now = timeNow();
+				m_shouldProcessTimers = false;
 
-				if (m_timers.front().timeout <= now) {
+				if (m_timers.front().timeout <= timeNow()) {
 					cb = std::move(m_timers.front().callback);
 
 					// Reorder the vector and remove the popped element
@@ -132,7 +128,6 @@ private:
 	std::mutex m_mtx;
 	std::condition_variable m_cv;
 	bool m_shouldProcessTimers{ false };
-	std::uint64_t m_globalTimerId{ 0 };
 	std::vector<Timer> m_timers;
 	std::jthread m_worker;
 };
