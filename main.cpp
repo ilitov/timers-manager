@@ -1,9 +1,10 @@
 #include <iostream>
 #include <functional>
+#include <algorithm>
 #include <cstdint>
 #include <thread>
 #include <mutex>
-#include <queue>
+#include <vector>
 #include <chrono>
 
 using namespace std::chrono_literals;
@@ -58,10 +59,12 @@ public:
 
 			const TimersPrecision internalTimeout = std::chrono::duration_cast<TimersPrecision>(timeout);
 
-			m_timers.push(Timer{ m_globalTimerId++, timeNow() + internalTimeout, std::move(cb) });
+			// Add new timer and heapify
+			m_timers.push_back(Timer{ m_globalTimerId++, timeNow() + internalTimeout, std::move(cb) });
+			std::push_heap(m_timers.begin(), m_timers.end(), std::greater{});
 
 			// This timer is on the top, wake up the worker
-			if (m_timers.top().id + 1 == m_globalTimerId) {
+			if (m_timers.front().id + 1 == m_globalTimerId) {
 				m_shouldProcessTimers = true;
 				return true;
 			}
@@ -87,7 +90,7 @@ private:
 				TimersPrecision nearestTimeout{ TimersPrecision::max() };
 
 				if (!m_timers.empty()) {
-					nearestTimeout = std::max(TimersPrecision{}, m_timers.top().timeout - timeNow());
+					nearestTimeout = std::max(TimersPrecision{ 0 }, m_timers.front().timeout - timeNow());
 				}
 
 				if (nearestTimeout > 0s) {
@@ -107,9 +110,12 @@ private:
 
 				const TimersPrecision now = timeNow();
 
-				if (m_timers.top().timeout <= now) {
-					cb = std::move(const_cast<Timer&>(m_timers.top()).callback);
-					m_timers.pop();
+				if (m_timers.front().timeout <= now) {
+					cb = std::move(m_timers.front().callback);
+
+					// Reorder the vector and remove the popped element
+					std::pop_heap(m_timers.begin(), m_timers.end(), std::greater{});
+					m_timers.pop_back();
 				}
 			}
 
@@ -126,7 +132,7 @@ private:
 	std::condition_variable m_cv;
 	bool m_shouldProcessTimers{ false };
 	std::uint64_t m_globalTimerId{ 0 };
-	std::priority_queue<Timer, std::vector<Timer>, std::greater<Timer>> m_timers;
+	std::vector<Timer> m_timers;
 	std::jthread m_worker;
 };
 
