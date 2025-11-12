@@ -20,9 +20,9 @@ private:
 	static constexpr bool IsTimeoutDuration = std::is_same_v<TimeoutType, std::chrono::duration<typename TimeoutType::rep, typename TimeoutType::period>>;
 
 	struct Timer {
-		std::uint64_t id;
-		TimersPrecision timeout;
-		TimerCallback callback;
+		std::uint64_t id{};
+		TimersPrecision timeout{};
+		TimerCallback callback{};
 
 		bool operator>(const Timer &rhs) const {
 			return timeout > rhs.timeout;
