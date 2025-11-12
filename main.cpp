@@ -80,7 +80,7 @@ public:
 
 private:
 	void workerLoop(std::stop_token stopToken) {
-		std::cout << "TimersManaer worker started\n";
+		std::cout << "TimersManager worker started\n";
 
 		while (true) {
 			TimerCallback cb;
@@ -165,7 +165,7 @@ struct RepeatingTimer {
 	TimersManager::TimerCallback callback;
 	std::chrono::seconds timeout;
 
-	void operator()() const {
+	void operator()() {
 		callback();
 		manager.insertTimer(RepeatingTimer{ manager, std::move(callback), timeout }, timeout);
 	}
